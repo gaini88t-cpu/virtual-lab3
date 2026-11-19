@@ -1,0 +1,1684 @@
+<!DOCTYPE html>
+<html lang="kk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>№4 Зертханалық жұмыс: C₃ және C₄ өсімдіктер мезофилі (Виртуалды микроскоп)</title>
+    <!-- Tailwind CSS жүктеу -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter шрифті -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f1f8e9;
+            color: #1c2826;
+        }
+        .eyepiece-overlay {
+            box-shadow: inset 0 0 60px 25px rgba(0, 0, 0, 0.88);
+        }
+        canvas {
+            touch-action: none;
+        }
+        /* Тегіс ауысу анимациясы */
+        .fade-in {
+            animation: fadeIn 0.3s ease-out forwards;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+    <!-- Firebase SDK (Деректерді сақтау және мұғалім-оқушы байланысы үшін) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Глобалды айнымалыларды тексеру
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'mesophyll-lab-default';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        window.labCloud = {
+            enabled: false,
+            db: null,
+            auth: null,
+            user: null,
+            appId: appId,
+            submissions: [],
+            unsubscribe: null
+        };
+
+        async function initCloud() {
+            if (!firebaseConfig) {
+                console.warn("Firebase config табылмады, локалды демонстрация режимі қосылды.");
+                window.dispatchEvent(new Event('cloudReady'));
+                return;
+            }
+            try {
+                const app = initializeApp(firebaseConfig);
+                const auth = getAuth(app);
+                const db = getFirestore(app);
+
+                if (initialToken) {
+                    await signInWithCustomToken(auth, initialToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        window.labCloud.enabled = true;
+                        window.labCloud.db = db;
+                        window.labCloud.auth = auth;
+                        window.labCloud.user = user;
+                        listenSubmissions();
+                        window.dispatchEvent(new Event('cloudReady'));
+                    }
+                });
+            } catch (err) {
+                console.error("Бұлттық жүйеге қосылу қатесі:", err);
+                window.dispatchEvent(new Event('cloudReady'));
+            }
+        }
+
+        function listenSubmissions() {
+            if (!window.labCloud.user || !window.labCloud.db) return;
+            const colRef = collection(window.labCloud.db, 'artifacts', window.labCloud.appId, 'public', 'data', 'lab_submissions');
+            
+            window.labCloud.unsubscribe = onSnapshot(colRef, (snapshot) => {
+                const list = [];
+                snapshot.forEach((docSnap) => {
+                    list.push({ id: docSnap.id, ...docSnap.data() });
+                });
+                // Уақыты бойынша сұрыптау (жаңасы жоғарыда)
+                list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                window.labCloud.submissions = list;
+                window.dispatchEvent(new CustomEvent('submissionsUpdated', { detail: list }));
+            }, (error) => {
+                console.error("Деректерді оқу қатесі:", error);
+            });
+        }
+
+        window.submitToCloud = async function(payload) {
+            if (!window.labCloud.enabled || !window.labCloud.user) {
+                // Егер Firebase конфигурациясы жоқ ортада ашылса, жадыда сақтау
+                payload.id = 'local_' + Date.now();
+                window.labCloud.submissions.unshift(payload);
+                window.dispatchEvent(new CustomEvent('submissionsUpdated', { detail: window.labCloud.submissions }));
+                return payload.id;
+            }
+            const colRef = collection(window.labCloud.db, 'artifacts', window.labCloud.appId, 'public', 'data', 'lab_submissions');
+            const docRef = await addDoc(colRef, payload);
+            return docRef.id;
+        };
+
+        window.updateSubmissionInCloud = async function(docId, updates) {
+            if (!window.labCloud.enabled || !window.labCloud.user || docId.startsWith('local_')) {
+                const idx = window.labCloud.submissions.findIndex(s => s.id === docId);
+                if (idx !== -1) {
+                    window.labCloud.submissions[idx] = { ...window.labCloud.submissions[idx], ...updates };
+                    window.dispatchEvent(new CustomEvent('submissionsUpdated', { detail: window.labCloud.submissions }));
+                }
+                return;
+            }
+            const docRef = doc(window.labCloud.db, 'artifacts', window.labCloud.appId, 'public', 'data', 'lab_submissions', docId);
+            await updateDoc(docRef, updates);
+        };
+
+        window.deleteSubmissionInCloud = async function(docId) {
+            if (!window.labCloud.enabled || !window.labCloud.user || docId.startsWith('local_')) {
+                window.labCloud.submissions = window.labCloud.submissions.filter(s => s.id !== docId);
+                window.dispatchEvent(new CustomEvent('submissionsUpdated', { detail: window.labCloud.submissions }));
+                return;
+            }
+            const docRef = doc(window.labCloud.db, 'artifacts', window.labCloud.appId, 'public', 'data', 'lab_submissions', docId);
+            await deleteDoc(docRef);
+        };
+
+        initCloud();
+    </script>
+</head>
+<body class="min-h-screen p-3 sm:p-5">
+        <div class="bg-emerald-950/50 border border-emerald-400/30 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium shrink-0 flex items-center gap-2">
+            <span id="cloudStatusDot" class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+            <span id="cloudStatusText">Жүйе қосылуда...</span>
+        </div>
+    </header>
+
+    <!-- Навигациялық қойындылар -->
+    <nav class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-5">
+        <button onclick="switchTab('microscope', this)" class="tab-btn active bg-emerald-800 text-white border-2 border-emerald-800 font-semibold py-3 px-4 rounded-xl shadow-sm transition-all text-xs sm:text-sm cursor-pointer">
+            1. Виртуалды микроскоп
+        </button>
+        <button onclick="switchTab('table', this)" class="tab-btn bg-white text-slate-700 hover:bg-emerald-50 border-2 border-emerald-200 font-semibold py-3 px-4 rounded-xl transition-all text-xs sm:text-sm cursor-pointer">
+            2. Салыстыру кестесі & Қорытынды
+        </button>
+        <button onclick="switchTab('quiz', this)" class="tab-btn bg-white text-slate-700 hover:bg-emerald-50 border-2 border-emerald-200 font-semibold py-3 px-4 rounded-xl transition-all text-xs sm:text-sm cursor-pointer">
+            3. Бекіту тесті & Жіберу
+        </button>
+        <button onclick="switchTab('teacher', this)" class="tab-btn bg-white text-indigo-900 hover:bg-indigo-50 border-2 border-indigo-200 font-bold py-3 px-4 rounded-xl transition-all text-xs sm:text-sm cursor-pointer flex items-center justify-center gap-2">
+            <span>👩‍🏫 4. Мұғалім кабинеті</span>
+            <span id="submissionBadge" class="bg-indigo-600 text-white text-xs px-2 py-0.5 rounded-full">0</span>
+        </button>
+    </nav>
+
+    <!-- Оқушыға мұғалімнен келген кері байланыс хабарламасы (егер бар болса) -->
+    <div id="studentFeedbackAlert" class="hidden mb-5 bg-indigo-50 border-l-4 border-indigo-600 p-4 rounded-2xl shadow-sm fade-in">
+        <div class="flex justify-between items-start gap-3">
+            <div>
+                <h3 class="font-bold text-indigo-950 text-sm sm:text-base flex items-center gap-2">
+                    📩 Мұғалімнің тексеру нәтижесі мен кері байланысы
+                    <span id="teacherGradeBadge" class="bg-indigo-600 text-white text-xs px-2.5 py-0.5 rounded-full"></span>
+                </h3>
+                <p id="teacherCommentDisplay" class="text-xs sm:text-sm text-indigo-900 mt-1.5"></p>
+                <p id="teacherCorrectionNote" class="text-xs text-indigo-700 mt-1 italic"></p>
+            </div>
+            <button onclick="document.getElementById('studentFeedbackAlert').classList.add('hidden')" class="text-indigo-400 hover:text-indigo-700 font-bold text-lg cursor-pointer">×</button>
+        </div>
+    </div>
+
+    <!-- 1-БӨЛІМ: ВИРТУАЛДЫ МИКРОСКОП -->
+    <section id="microscope" class="tab-section fade-in">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            <!-- Сол жақ: Микроскоп экраны мен басқару пульті -->
+            <div class="lg:col-span-7 bg-white p-4 sm:p-5 rounded-2xl shadow-md border border-emerald-100">
+                <div class="flex flex-wrap justify-between items-center gap-2 mb-3">
+                    <h2 class="text-base sm:text-lg font-bold text-emerald-900">Микропрепараттарды зерттеу</h2>
+                    <span id="zoomLabel" class="text-xs sm:text-sm font-mono font-semibold bg-emerald-50 text-emerald-800 px-3 py-1 rounded-lg border border-emerald-200">
+                        Ұлғайту: 100x
+                    </span>
+                </div>
+
+                <!-- Үлгілерді таңдау батырмалары -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
+                    <button onclick="selectSpecimen('ficus', this)" class="spec-btn active bg-emerald-700 text-white border border-emerald-800 py-2.5 px-3 rounded-xl font-semibold text-xs sm:text-sm transition cursor-pointer shadow-sm">
+                        1. Фикус (Ficus elastica) — C₃
+                    </button>
+                    <button onclick="selectSpecimen('maize', this)" class="spec-btn bg-lime-50 text-slate-800 hover:bg-emerald-100 border border-emerald-300 py-2.5 px-3 rounded-xl font-semibold text-xs sm:text-sm transition cursor-pointer">
+                        2. Жүгері (Zea mays) — C₄
+                    </button>
+                    <button onclick="selectSpecimen('pine', this)" class="spec-btn bg-lime-50 text-slate-800 hover:bg-emerald-100 border border-emerald-300 py-2.5 px-3 rounded-xl font-semibold text-xs sm:text-sm transition cursor-pointer">
+                        3. Қарағай (Pinus sylvestris)
+                    </button>
+                </div>
+
+                <!-- Микроскоп окуляры (Canvas) -->
+                <div id="canvasContainer" class="relative w-full h-80 sm:h-96 bg-slate-900 rounded-2xl overflow-hidden border-4 border-slate-800 shadow-inner">
+                    <canvas id="microCanvas" class="w-full h-full block cursor-crosshair"></canvas>
+                    <div class="eyepiece-overlay absolute inset-0 pointer-events-none rounded-xl"></div>
+                    <!-- HUD индикаторлары -->
+                    <div class="absolute top-3 left-3 right-3 flex justify-between items-center pointer-events-none text-[11px] sm:text-xs font-mono text-emerald-300 drop-shadow">
+                        <span id="hudSpecimen" class="bg-black/60 px-2.5 py-1 rounded-md">ҮЛГІ: FICUS ELASTICA (C3)</span>
+                        <span id="hudFocus" class="bg-black/60 px-2.5 py-1 rounded-md">ФОКУС: АНЫҚ (100%)</span>
+                    </div>
+                </div>
+
+                <!-- Микроскоп реттегіштері -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4 bg-emerald-50/70 p-3.5 rounded-xl border border-emerald-100">
+                    <div class="flex flex-col gap-1">
+                        <label for="zoomSlider" class="text-xs font-bold text-slate-700">🔍 Ұлғайту (Окуляр × Объектив):</label>
+                        <input type="range" id="zoomSlider" min="1" max="2.2" step="0.1" value="1" oninput="updateMicroscope()" class="accent-emerald-700 cursor-pointer h-2 bg-emerald-200 rounded-lg">
+                    </div>
+                    <div class="flex flex-col gap-1">
+                        <label for="focusSlider" class="text-xs font-bold text-slate-700">🎯 Микровинт (Фокус):</label>
+                        <input type="range" id="focusSlider" min="-10" max="10" step="1" value="0" oninput="updateMicroscope()" class="accent-emerald-700 cursor-pointer h-2 bg-emerald-200 rounded-lg">
+                    </div>
+                    <div class="flex items-center justify-center">
+                        <button id="labelToggle" onclick="toggleLabels()" class="w-full py-2.5 px-3 rounded-xl border border-emerald-700 bg-emerald-700 text-white font-semibold text-xs sm:text-sm transition cursor-pointer shadow-sm">
+                            🏷️ Белгілер: ҚОСУЛЫ
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Оң жақ: Анатомиялық талдау панелі -->
+            <div class="lg:col-span-5 bg-white p-4 sm:p-5 rounded-2xl shadow-md border border-emerald-100 flex flex-col justify-between">
+                <div>
+                    <h2 class="text-base sm:text-lg font-bold text-emerald-900 mb-3">Анатомиялық талдау</h2>
+                    
+                    <div id="structureInfo" class="bg-emerald-50 border-l-4 border-emerald-700 p-4 rounded-xl mb-4 min-h-[125px] transition-all">
+                        <h3 id="infoTitle" class="font-bold text-emerald-900 text-sm sm:text-base mb-1">
+                            Фикус жапырағы (Ficus elastica) — C₃ типті
+                        </h3>
+                        <p id="infoDesc" class="text-xs sm:text-sm text-slate-700 leading-relaxed">
+                            Тіндердің құрылысын көру үшін микроскоп өрісіндегі қабаттардың үстіне тінтуірді апарыңыз (немесе саусақпен түртіңіз), не болмаса төмендегі тізімнен таңдаңыз.
+                        </p>
+                    </div>
+
+                    <h4 class="text-xs sm:text-sm font-bold text-emerald-800 mb-2">Құрылымдық элементтер (таңдап көріңіз):</h4>
+                    <ul id="legendList" class="grid grid-cols-1 sm:grid-cols-2 gap-2"></ul>
+                </div>
+
+                <div class="mt-4 p-3.5 bg-amber-50 rounded-xl border border-amber-200 text-xs sm:text-sm text-amber-950">
+                    <strong>💡 Зерттеушіге кеңес:</strong> Микровинтті (фокусты) реттеп, әр өсімдіктің мезофилл жасушаларының орналасуын және өткізгіш шоқ айналасындағы қабаттарды мұқият салыстырыңыз.
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 2-БӨЛІМ: САЛЫСТЫРУ КЕСТЕСІ ЖӘНЕ ҚОРЫТЫНДЫ -->
+    <section id="table" class="tab-section hidden fade-in">
+        <div class="bg-white p-4 sm:p-6 rounded-2xl shadow-md border border-emerald-100">
+            <h2 class="text-base sm:text-lg font-bold text-emerald-900 mb-1">2. Жапырақ мезофилінің құрылымын салыстыру кестесі</h2>
+            <p class="text-xs sm:text-sm text-slate-600 mb-4">Микропрепараттардан бақылаған мәліметтер негізінде кестені толтырып, жауабыңызды тексеріңіз.</p>
+
+            <!-- Оқушы деректері -->
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                <input type="text" id="studentName" placeholder="Оқушының аты-жөні" class="p-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:border-emerald-600">
+                <input type="text" id="studentClass" placeholder="Сыныбы (мысалы: 11 «А»)" class="p-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:border-emerald-600">
+                <input type="date" id="labDate" class="p-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:border-emerald-600">
+            </div>
+
+            <!-- Салыстыру кестесі -->
+            <div class="overflow-x-auto rounded-xl border border-slate-300">
+                <table class="w-full border-collapse text-left text-xs sm:text-sm">
+                    <thead>
+                        <tr class="bg-emerald-800 text-white">
+                            <th class="p-3 border-b border-emerald-700 w-1/5">Өсімдік түрі</th>
+                            <th class="p-3 border-b border-emerald-700 w-1/5">Фотосинтез түрі (C₃ / C₄)</th>
+                            <th class="p-3 border-b border-emerald-700 w-3/10">Мезофилл түрі / Ерекшелігі</th>
+                            <th class="p-3 border-b border-emerald-700 w-3/10">Өткізгіш шоқтар мен гиподерма</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-200">
+                        <tr class="bg-white">
+                            <td class="p-3 font-semibold text-slate-800">Фикус<br><span class="italic font-normal text-slate-500">(Ficus elastica)</span></td>
+                            <td class="p-3">
+                                <select id="t_ficus_1" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="">-- Таңдаңыз --</option>
+                                    <option value="c3">C₃ фотосинтез</option>
+                                    <option value="c4">C₄ фотосинтез</option>
+                                    <option value="cam">CAM фотосинтез</option>
+                                </select>
+                            </td>
+                            <td class="p-3">
+                                <select id="t_ficus_2" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="">-- Таңдаңыз --</option>
+                                    <option value="kranz">Кранц (тәж) құрылысты мезофилл</option>
+                                    <option value="palisade">Изолатеральды-бағаналы және кеуекті паренхимаға жіктелген</option>
+                                    <option value="folded">Бүктелген (қатпарлы) паренхима</option>
+                                </select>
+                            </td>
+                            <td class="p-3">
+                                <select id="t_ficus_3" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="">-- Таңдаңыз --</option>
+                                    <option value="hypo">Көпқабатты гиподерма, цистолиттер бар; шоқ қынабы ірі хлоропластсыз</option>
+                                    <option value="sheath">Шоқпарбас (ірі) жасушалар қабаты өткізгіш шоқты қоршайды</option>
+                                    <option value="resin">Шайыр жолдары және айқын эндодерма қабаты бар</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr class="bg-lime-50/50">
+                            <td class="p-3 font-semibold text-slate-800">Жүгері<br><span class="italic font-normal text-slate-500">(Zea mays)</span></td>
+                            <td class="p-3">
+                                <select id="t_maize_1" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="">-- Таңдаңыз --</option>
+                                    <option value="c3">C₃ фотосинтез</option>
+                                    <option value="c4">C₄ фотосинтез</option>
+                                </select>
+                            </td>
+                            <td class="p-3">
+                                <select id="t_maize_2" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="">-- Таңдаңыз --</option>
+                                    <option value="kranz">Кранц (Kranz) құрылысы, бағаналы/кеуекті болып жіктелмеген</option>
+                                    <option value="palisade">Бағаналы және кеуекті мезофилл айқын бөлінген</option>
+                                    <option value="folded">Бүктелген мезофилл</option>
+                                </select>
+                            </td>
+                            <td class="p-3">
+                                <select id="t_maize_3" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="">-- Таңдаңыз --</option>
+                                    <option value="sheath">Өткізгіш шоқтарды хлоропластқа бай ірі шоқпарбас жасушалар қоршайды</option>
+                                    <option value="hypo">Қалың гиподерма және цистолиттер бар</option>
+                                    <option value="resin">Шайыр өзектері мен эндодерма бар</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr class="bg-white">
+                            <td class="p-3 font-semibold text-slate-800">Қарағай<br><span class="italic font-normal text-slate-500">(Pinus sylvestris)</span></td>
+                            <td class="p-3">
+                                <select id="t_pine_1" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="">-- Таңдаңыз --</option>
+                                    <option value="c3">C₃ фотосинтез (инежапырақты)</option>
+                                    <option value="c4">C₄ фотосинтез</option>
+                                </select>
+                            </td>
+                            <td class="p-3">
+                                <select id="t_pine_2" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="">-- Таңдаңыз --</option>
+                                    <option value="folded">Центрлі типті мезофилл, бүктелген паренхима</option>
+                                    <option value="kranz">Кранц құрылысты мезофилл</option>
+                                    <option value="palisade">Кеуекті паренхима басым</option>
+                                </select>
+                            </td>
+                            <td class="p-3">
+                                <select id="t_pine_3" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="">-- Таңдаңыз --</option>
+                                    <option value="resin">Гиподерма, шайыр жолдары және өткізгіш шоқты қоршаған эндодерма бар</option>
+                                    <option value="hypo">Цистолиттер мен көпқабатты жоғарғы гиподерма</option>
+                                    <option value="sheath">Кранц-шоқ қынабы</option>
+                                </select>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Қорытындылау өрісі -->
+            <div class="mt-5">
+                <label for="conclusionText" class="block font-bold text-emerald-900 text-xs sm:text-sm mb-2">
+                    3. Қорытындылау (C₃ және C₄ өсімдіктері жапырақтарының мезофилл құрылысындағы айырмашылықтар мен олардың экологиялық маңызы қандай?):
+                </label>
+                <textarea id="conclusionText" rows="4" placeholder="Өз қорытындыңызды жазыңыз..." class="w-full p-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:border-emerald-600"></textarea>
+            </div>
+
+            <!-- Әрекет батырмалары -->
+            <div class="flex flex-wrap gap-3 mt-4">
+                <button onclick="checkTable()" class="bg-emerald-700 hover:bg-emerald-800 text-white font-semibold py-2.5 px-5 rounded-xl shadow transition cursor-pointer text-sm">
+                    ✅ Кестені тексеру
+                </button>
+                <button onclick="fillSampleConclusion()" class="bg-teal-700 hover:bg-teal-800 text-white font-semibold py-2.5 px-5 rounded-xl shadow transition cursor-pointer text-sm">
+                    💡 Үлгі қорытындыны көру
+                </button>
+                <button onclick="copyWorkSummary()" class="bg-slate-700 hover:bg-slate-800 text-white font-semibold py-2.5 px-5 rounded-xl shadow transition cursor-pointer text-sm">
+                    📋 Нәтижені көшіру
+                </button>
+            </div>
+
+            <div id="tableFeedback" class="hidden mt-4 p-3.5 rounded-xl font-semibold text-sm"></div>
+        </div>
+    </section>
+
+    <!-- 3-БӨЛІМ: БЕКІТУ ТЕСТІ ЖӘНЕ МҰҒАЛІМГЕ ЖІБЕРУ -->
+    <section id="quiz" class="tab-section hidden fade-in">
+        <div class="bg-white p-4 sm:p-6 rounded-2xl shadow-md border border-emerald-100">
+            <h2 class="text-base sm:text-lg font-bold text-emerald-900 mb-4">3. Бекіту тапсырмалары (Өзін-өзі тексеру)</h2>
+
+            <div class="space-y-4">
+                <div class="bg-lime-50/70 p-4 rounded-xl border border-lime-200">
+                    <p class="font-semibold text-slate-800 text-sm sm:text-base mb-2.5">
+                        1. Қай өсімдік жапырағының көлденең қимасында өткізгіш шоқты айнала қоршап тұрған ірі хлоропластты «шоқпарбас» жасушалар (Кранц анатомиясы) байқалады?
+                    </p>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm mb-1.5">
+                        <input type="radio" name="q1" value="a" class="accent-emerald-700"> Фикус (Ficus elastica)
+                    </label>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm mb-1.5">
+                        <input type="radio" name="q1" value="b" class="accent-emerald-700"> Жүгері (Zea mays)
+                    </label>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm">
+                        <input type="radio" name="q1" value="c" class="accent-emerald-700"> Кәдімгі қарағай (Pinus sylvestris)
+                    </label>
+                </div>
+
+                <div class="bg-lime-50/70 p-4 rounded-xl border border-lime-200">
+                    <p class="font-semibold text-slate-800 text-sm sm:text-base mb-2.5">
+                        2. Фикус жапырағының құрылысына тән ерекшелікті көрсетіңіз:
+                    </p>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm mb-1.5">
+                        <input type="radio" name="q2" value="a" class="accent-emerald-700"> Көпқабатты гиподерма, цистолиттер және бағаналы/кеуекті мезофилл
+                    </label>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm mb-1.5">
+                        <input type="radio" name="q2" value="b" class="accent-emerald-700"> Шайыр жолдары және бүктелген паренхима
+                    </label>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm">
+                        <input type="radio" name="q2" value="c" class="accent-emerald-700"> Мезофилдің бағаналы және кеуекті қабаттарға мүлдем бөлінбеуі
+                    </label>
+                </div>
+
+                <div class="bg-lime-50/70 p-4 rounded-xl border border-lime-200">
+                    <p class="font-semibold text-slate-800 text-sm sm:text-base mb-2.5">
+                        3. Кәдімгі қарағай (Pinus sylvestris) қылқанының құрғақшылыққа бейімделу белгісі қандай?
+                    </p>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm mb-1.5">
+                        <input type="radio" name="q3" value="a" class="accent-emerald-700"> Жұқа эпидермис және ірі ауа қуыстары
+                    </label>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm mb-1.5">
+                        <input type="radio" name="q3" value="b" class="accent-emerald-700"> Қалың кутикула, склеренхималық гиподерма, бүктелген мезофилл және шайыр жолдары
+                    </label>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm">
+                        <input type="radio" name="q3" value="c" class="accent-emerald-700"> Кранц-анатомия және цистолиттер
+                    </label>
+                </div>
+
+                <div class="bg-lime-50/70 p-4 rounded-xl border border-lime-200">
+                    <p class="font-semibold text-slate-800 text-sm sm:text-base mb-2.5">
+                        4. C₄ өсімдіктерінің экологиялық артықшылығы неде?
+                    </p>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm mb-1.5">
+                        <input type="radio" name="q4" value="a" class="accent-emerald-700"> Төмен температура мен көлеңкелі жерде ғана өседі
+                    </label>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm mb-1.5">
+                        <input type="radio" name="q4" value="b" class="accent-emerald-700"> Фототынысалуды тежеп, жоғары температура мен жарық қарқындылығында CO₂-ні тиімді сіңіреді
+                    </label>
+                    <label class="flex items-center gap-2.5 p-2.5 bg-white rounded-lg border border-slate-200 hover:bg-emerald-50 cursor-pointer text-sm">
+                        <input type="radio" name="q4" value="c" class="accent-emerald-700"> Суды мүлдем қажет етпейді
+                    </label>
+                </div>
+            </div>
+
+            <div class="mt-5 flex flex-wrap items-center gap-3">
+                <button onclick="checkQuiz()" class="bg-emerald-700 hover:bg-emerald-800 text-white font-semibold py-2.5 px-6 rounded-xl shadow transition cursor-pointer text-sm sm:text-base">
+                    Нәтижені есептеу
+                </button>
+                <button onclick="submitStudentWork()" id="submitWorkBtn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-6 rounded-xl shadow-md transition cursor-pointer text-sm sm:text-base flex items-center gap-2">
+                    <span>📤 Зертханалық жұмысты мұғалімге жіберу</span>
+                </button>
+            </div>
+
+            <div id="quizFeedback" class="hidden mt-4 p-3.5 rounded-xl font-semibold text-sm"></div>
+            <div id="submitStatusBanner" class="hidden mt-3 p-4 rounded-xl font-semibold text-sm border"></div>
+        </div>
+    </section>
+
+    <!-- 4-БӨЛІМ: МҰҒАЛІМ КАБИНЕТІ (СТАТИСТИКА ЖӘНЕ ТЕКСЕРУ) -->
+    <section id="teacher" class="tab-section hidden fade-in">
+        <!-- Мұғалімге кіру / Құпиясөз панелі -->
+        <div id="teacherLoginBox" class="bg-white p-6 rounded-2xl shadow-md border border-indigo-100 max-w-md mx-auto text-center">
+            <div class="w-12 h-12 bg-indigo-100 text-indigo-700 rounded-full flex items-center justify-center mx-auto mb-3 text-xl font-bold">
+                👩‍🏫
+            </div>
+            <h2 class="text-lg font-bold text-slate-800 mb-1">Мұғалім кабинетіне кіру</h2>
+            <p class="text-xs text-slate-500 mb-4">Сынып статистикасын көру және оқушылардың жұмыстарын түзету үшін кіріңіз (Әдепкі код: <strong>1234</strong>)</p>
+            <div class="flex gap-2">
+                <input type="password" id="teacherPinInput" placeholder="Құпия код (1234)" class="flex-1 p-2.5 border border-slate-300 rounded-xl text-sm text-center font-mono tracking-widest focus:outline-none focus:border-indigo-600">
+                <button onclick="unlockTeacherPanel()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-5 py-2.5 rounded-xl text-sm cursor-pointer transition">
+                    Кіру
+                </button>
+            </div>
+            <p id="teacherLoginError" class="text-xs text-red-600 mt-2 hidden">Құпия код қате! 1234 санын енгізіп көріңіз.</p>
+        </div>
+
+        <!-- Мұғалімнің негізгі жұмыс тақтасы -->
+        <div id="teacherDashboard" class="hidden space-y-5">
+            <!-- Жоғарғы фильтр және демо дерек батырмасы -->
+            <div class="bg-white p-4 rounded-2xl shadow-sm border border-indigo-100 flex flex-wrap justify-between items-center gap-3">
+                <div>
+                    <h2 class="text-base sm:text-lg font-bold text-indigo-950">📊 Сыныптың зертханалық жұмысты меңгеру статистикасы</h2>
+                    <p class="text-xs text-slate-500">Оқушылар жіберген жұмыстар нақты уақыт режимінде жаңарады</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                    <select id="classFilterSelect" onchange="renderTeacherDashboard()" class="p-2 border border-slate-300 rounded-xl text-xs sm:text-sm bg-white font-medium">
+                        <option value="ALL">Барлық сыныптар</option>
+                    </select>
+                    <button onclick="loadDemoSubmissions()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold px-3 py-2 rounded-xl text-xs transition cursor-pointer">
+                        + Тесттік оқушылар қосу
+                    </button>
+                </div>
+            </div>
+
+            <!-- 1. Жалпы статистикалық карточкалар -->
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+                    <div class="text-xs text-slate-500 font-medium">Тапсырған оқушылар</div>
+                    <div id="statTotalStudents" class="text-2xl sm:text-3xl font-extrabold text-slate-800 mt-1">0</div>
+                    <div class="text-[11px] text-emerald-600 mt-1 font-medium">Жалпы жұмыс саны</div>
+                </div>
+                <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+                    <div class="text-xs text-slate-500 font-medium">Орташа меңгеру деңгейі</div>
+                    <div id="statAvgScore" class="text-2xl sm:text-3xl font-extrabold text-indigo-700 mt-1">0%</div>
+                    <div class="text-[11px] text-slate-500 mt-1">Кесте + Тест жиынтығы</div>
+                </div>
+                <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+                    <div class="text-xs text-slate-500 font-medium">Толық түсінгендер (≥80%)</div>
+                    <div id="statMasteredCount" class="text-2xl sm:text-3xl font-extrabold text-emerald-600 mt-1">0</div>
+                    <div id="statMasteredPercent" class="text-[11px] text-emerald-700 mt-1 font-medium">Сыныптың 0%-ы</div>
+                </div>
+                <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+                    <div class="text-xs text-slate-500 font-medium">Қосымша көмек қажет (&lt;60%)</div>
+                    <div id="statNeedHelpCount" class="text-2xl sm:text-3xl font-extrabold text-amber-600 mt-1">0</div>
+                    <div class="text-[11px] text-amber-700 mt-1 font-medium">Қайта түсіндіруді қажет етеді</div>
+                </div>
+            </div>
+
+            <!-- 2. Тақырыптық бөлімдер бойынша түсіну талдауы (Progress bars) -->
+            <div class="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-indigo-100">
+                <h3 class="text-sm sm:text-base font-bold text-slate-800 mb-3">📈 Тақырыптық ұғымдар бойынша сыныптың меңгеру көрсеткіші</h3>
+                <div id="topicBreakdownContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs sm:text-sm">
+                    <!-- JS арқылы толтырылады -->
+                </div>
+            </div>
+
+            <!-- 3. Оқушылар тізімі және жеке тексеру / түзету аймағы -->
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+                <!-- Сол жақ: Оқушылар тізімі -->
+                <div class="lg:col-span-5 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+                    <h3 class="text-sm sm:text-base font-bold text-slate-800 mb-3">👨‍🎓 Оқушылардың жұмыстары</h3>
+                    <div id="studentListContainer" class="space-y-2 max-h-[520px] overflow-y-auto pr-1">
+                        <p class="text-xs text-slate-400 text-center py-8">Әзірге ешбір оқушы жұмыс жібермеген.</p>
+                    </div>
+                </div>
+
+                <!-- Оң жақ: Таңдалған оқушының жұмысын тексеру және қатесін түзету -->
+                <div class="lg:col-span-7 bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-indigo-200">
+                    <div id="noStudentSelectedMsg" class="text-center py-16 text-slate-400 text-sm">
+                        👈 Тексеру және қатесін түзету үшін сол жақ тізімнен оқушыны таңдаңыз
+                    </div>
+
+                    <div id="studentReviewEditor" class="hidden space-y-4">
+                        <div class="flex flex-wrap justify-between items-start gap-2 border-b border-slate-200 pb-3">
+                            <div>
+                                <h3 id="revStudentName" class="text-base sm:text-lg font-bold text-indigo-950">Оқушы аты</h3>
+                                <p id="revStudentMeta" class="text-xs text-slate-500">Сыныбы • Уақыты</p>
+                            </div>
+                            <button onclick="deleteCurrentStudentWork()" class="text-xs text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg border border-red-200 cursor-pointer">
+                                🗑️ Жою
+                            </button>
+                        </div>
+
+                        <!-- Кесте жауаптарын тексеру және мұғалімнің түзетуі -->
+                        <div>
+                            <div class="flex justify-between items-center mb-2">
+                                <h4 class="text-xs sm:text-sm font-bold text-slate-800">1. Салыстыру кестесі (Қателерді түзетуге болады):</h4>
+                                <span id="revTableScore" class="text-xs font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">0/9</span>
+                            </div>
+                            <div class="overflow-x-auto border border-slate-200 rounded-xl">
+                                <table class="w-full text-xs text-left border-collapse">
+                                    <thead class="bg-slate-100 text-slate-700">
+                                        <tr>
+                                            <th class="p-2 border-b">Өсімдік</th>
+                                            <th class="p-2 border-b">Фотосинтез</th>
+                                            <th class="p-2 border-b">Мезофилл</th>
+                                            <th class="p-2 border-b">Шоқ / Гиподерма</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="revTableBody" class="divide-y divide-slate-200">
+                                        <!-- JS арқылы толтырылады -->
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p class="text-[11px] text-slate-500 mt-1">* Қызыл ұяшықтар — оқушының қате жауабы. Мұғалім ашылмалы тізімнен дұрыс нұсқаға түзете алады.</p>
+                        </div>
+
+                        <!-- Тест нәтижесі -->
+                        <div class="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                            <div class="flex justify-between items-center mb-1.5">
+                                <h4 class="text-xs sm:text-sm font-bold text-slate-800">2. Бекіту тесті жауаптары:</h4>
+                                <span id="revQuizScore" class="text-xs font-bold px-2 py-0.5 rounded bg-indigo-100 text-indigo-800">0/4</span>
+                            </div>
+                            <div id="revQuizDetails" class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs"></div>
+                        </div>
+
+                        <!-- Оқушы қорытындысы және мұғалім түзетуі -->
+                        <div>
+                            <label class="block text-xs sm:text-sm font-bold text-slate-800 mb-1">3. Оқушының қорытынды жазбасы (Мұғалім редакциялай алады):</label>
+                            <textarea id="revConclusionEdit" rows="3" class="w-full p-2.5 border border-slate-300 rounded-xl text-xs sm:text-sm focus:outline-none focus:border-indigo-600"></textarea>
+                        </div>
+
+                        <!-- Мұғалімнің бағасы мен кері байланысы -->
+                        <div class="bg-indigo-50/80 p-3.5 rounded-xl border border-indigo-200 space-y-3">
+                            <h4 class="text-xs sm:text-sm font-bold text-indigo-950">✍️ Мұғалімнің бағалауы мен кері байланысы:</h4>
+                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-indigo-900 mb-1">Қорытынды баға / Балл:</label>
+                                    <input type="text" id="revTeacherGrade" placeholder="Мысалы: 10/10 (Өте жақсы)" class="w-full p-2 border border-indigo-200 rounded-lg text-xs bg-white">
+                                </div>
+                                <div class="sm:col-span-2">
+                                    <label class="block text-[11px] font-semibold text-indigo-900 mb-1">Оқушыға пікір / Түзету ескертпесі:</label>
+                                    <input type="text" id="revTeacherComment" placeholder="Мысалы: Жүгерінің Кранц құрылымын дұрыс таптың, кестедегі 2-қате түзетілді." class="w-full p-2 border border-indigo-200 rounded-lg text-xs bg-white">
+                                </div>
+                            </div>
+                            <div class="flex justify-end">
+                                <button onclick="saveTeacherCorrection()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-5 py-2 rounded-xl text-xs sm:text-sm shadow cursor-pointer transition">
+                                    💾 Түзетулерді сақтау және оқушыға жіберу
+                                </button>
+                            </div>
+                            <div id="teacherSaveToast" class="hidden text-xs font-semibold text-emerald-700 bg-emerald-100 p-2 rounded-lg text-center">
+                                ✅ Түзетулер мен баға сәтті сақталды! Оқушы өз экранында көре алады.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+
+<script>
+    // Негізгі күй айнымалылары
+    let currentSpecimen = 'ficus';
+    let showLabels = true;
+    let hoveredZone = null;
+    let currentStudentSubmissionId = null;
+    let selectedReviewId = null;
+    let isTeacherUnlocked = false;
+
+    // Дұрыс жауаптар кілті
+    const TABLE_ANSWERS = {
+        t_ficus_1: 'c3', t_ficus_2: 'palisade', t_ficus_3: 'hypo',
+        t_maize_1: 'c4', t_maize_2: 'kranz', t_maize_3: 'sheath',
+        t_pine_1: 'c3', t_pine_2: 'folded', t_pine_3: 'resin'
+    };
+
+    const OPTION_LABELS = {
+        t_ficus_1: { c3: "C₃ фотосинтез", c4: "C₄ фотосинтез", cam: "CAM фотосинтез" },
+        t_ficus_2: { kranz: "Кранц құрылысты", palisade: "Бағаналы және кеуекті паренхима", folded: "Бүктелген паренхима" },
+        t_ficus_3: { hypo: "Көпқабатты гиподерма, цистолиттер", sheath: "Шоқпарбас жасушалар", resin: "Шайыр жолдары, эндодерма" },
+        t_maize_1: { c3: "C₃ фотосинтез", c4: "C₄ фотосинтез" },
+        t_maize_2: { kranz: "Кранц (Kranz) құрылысы", palisade: "Бағаналы/кеуекті бөлінген", folded: "Бүктелген мезофилл" },
+        t_maize_3: { sheath: "Шоқпарбас жасушалар қоршайды", hypo: "Қалың гиподерма, цистолиттер", resin: "Шайыр өзектері, эндодерма" },
+        t_pine_1: { c3: "C₃ (инежапырақты)", c4: "C₄ фотосинтез" },
+        t_pine_2: { folded: "Центрлі типті, бүктелген паренхима", kranz: "Кранц құрылысты", palisade: "Кеуекті паренхима" },
+        t_pine_3: { resin: "Гиподерма, шайыр жолдары, эндодерма", hypo: "Цистолиттер мен гиподерма", sheath: "Кранц-шоқ қынабы" }
+    };
+
+    const QUIZ_ANSWERS = { q1: 'b', q2: 'a', q3: 'b', q4: 'b' };
+
+    // Әр өсімдік үлгісінің анатомиялық деректері
+    const specimenData = {
+        ficus: {
+            title: "Фикус жапырағы (Ficus elastica) — C₃ типті",
+            desc: "Қос қабатты қорғаныс жүйесі бар (қалың кутикула + көпқабатты гиподерма). Мезофилі бағаналы және кеуекті паренхимаға жіктелген. Кейбір гиподерма жасушаларында кальций карбонаты кристалдары — цистолиттер орналасқан.",
+            hud: "ҮЛГІ: FICUS ELASTICA (C3)",
+            zones: [
+                { id: "cuticle", name: "Жоғарғы эпидермис және гиподерма", color: "#aed581", yRatioMin: 0.05, yRatioMax: 0.26, desc: "Қалың кутикуламен қапталған эпидермис және оның астындағы 2-3 қабатты су жинаушы гиподерма. Мұнда ірі цистолиттер кездеседі." },
+                { id: "palisade", name: "Бағаналы паренхима (мезофилл)", color: "#388e3c", yRatioMin: 0.26, yRatioMax: 0.50, desc: "Тығыз орналасқан ұзынша жасушалар. Хлоропласттарға өте бай, негізгі C₃ фотосинтез осы қабатта жүреді." },
+                { id: "bundle", name: "Өткізгіш шоқ (ксилема/флоэма)", color: "#e57373", yRatioMin: 0.50, yRatioMax: 0.66, desc: "Су мен минералды заттарды (ксилема) және органикалық заттарды (флоэма) тасымалдайды. Кранц-қынабы жоқ." },
+                { id: "spongy", name: "Кеуекті паренхима", color: "#81c784", yRatioMin: 0.66, yRatioMax: 0.88, desc: "Жасушааралық кеңістіктері үлкен борпылдақ қабат. Газ алмасу мен транспирацияны қамтамасыз етеді." },
+                { id: "lower", name: "Төменгі эпидермис және лептесіктер", color: "#c5e1a5", yRatioMin: 0.88, yRatioMax: 0.98, desc: "Газ алмасуды реттейтін батыңқы лептесіктері бар төменгі жабын ұлпасы." }
+            ]
+        },
+        maize: {
+            title: "Жүгері жапырағы (Zea mays) — C₄ (Кранц құрылысы)",
+            desc: "Кранц (тәж) анатомиясы тән: мезофилл бағаналы және кеуекті болып бөлінбейді. Өткізгіш шоқтарды ірі хлоропластты шоқпарбас (шоқ қынабы) жасушалары сақина тәрізді қоршап тұрады.",
+            hud: "ҮЛГІ: ZEA MAYS (C4 — KRANZ)",
+            zones: [
+                { id: "epi_m", name: "Эпидермис және моторлы жасушалар", color: "#dcedc8", yRatioMin: 0.06, yRatioMax: 0.20, desc: "Бірқабатты эпидермис. Құрғақшылық кезінде жапырақтың ширатылуына жауапты ірі моторлы (көпіршікті) жасушалары бар." },
+                { id: "meso_m", name: "Бірыңғай C₄ мезофилл жасушалары", color: "#66bb6a", yRatioMin: 0.20, yRatioMax: 0.39, desc: "Өткізгіш шоқ айналасында сәулелене орналасқан. Мұнда CO₂ алғаш рет ФЕП-карбоксилаза ферментімен байланысады." },
+                { id: "kranz", name: "Шоқпарбас жасуша қабаты (Кранц-қынап)", color: "#1b5e20", yRatioMin: 0.39, yRatioMax: 0.69, desc: "Өткізгіш шоқты тығыз қоршаған ірі жасушалар. Крахмал дәндері мен ірі хлоропласттарға бай — Кальвин циклі осында өтеді." },
+                { id: "vasc_m", name: "Өткізгіш шоқ (ксилема мен флоэма)", color: "#ef5350", yRatioMin: 0.47, yRatioMax: 0.61, desc: "Кранц-қынаптың дәл ортасында орналасқан өткізгіш түтіктер жүйесі." },
+                { id: "low_m", name: "Төменгі эпидермис", color: "#c5e1a5", yRatioMin: 0.80, yRatioMax: 0.95, desc: "Екі жағында да лептесіктері орналасқан жабын ұлпасы." }
+            ]
+        },
+        pine: {
+            title: "Кәдімгі қарағай қылқаны (Pinus sylvestris)",
+            desc: "Құрғақшылыққа бейімделген ксероморфты құрылыс: қалың кутикула, склеренхималық гиподерма, бүктелген (қатпарлы) мезофилл, шайыр жолдары және өткізгіш шоқтарды қоршайтын эндодерма бар.",
+            hud: "ҮЛГІ: PINUS SYLVESTRIS (ИНЕЖАПЫРАҚ)",
+            zones: [
+                { id: "p_epi", name: "Эпидермис және гиподерма", color: "#8d6e63", yRatioMin: 0.06, yRatioMax: 0.20, desc: "Қалың қабырғалы эпидермис, батыңқы лептесіктер және берік механикалық гиподерма қабаты." },
+                { id: "p_meso", name: "Бүктелген (қатпарлы) мезофилл", color: "#43a047", yRatioMin: 0.20, yRatioMax: 0.45, desc: "Жасуша қабырғалары ішке қарай қатпарланған паренхима. Бұл хлоропласттар орналасатын ішкі беттік ауданды ұлғайтады." },
+                { id: "p_resin", name: "Шайыр жолдары (өзектері)", color: "#ffb300", yRatioMin: 0.27, yRatioMax: 0.42, desc: "Мезофилл ішінде орналасқан, шайыр бөлетін эпителий жасушаларымен қапталған арнайы қуыстар." },
+                { id: "p_endo", name: "Эндодерма қабаты", color: "#90caf9", yRatioMin: 0.45, yRatioMax: 0.57, desc: "Орталық цилиндр мен өткізгіш шоқтарды мезофиллден бөліп тұратын сопақша жасушалар сақинасы." },
+                { id: "p_vasc", name: "Қос өткізгіш шоқ және трансфузиялық ұлпа", color: "#e53935", yRatioMin: 0.57, yRatioMax: 0.82, desc: "Орталық бөлікте орналасқан екі өткізгіш шоқ және су мен қоректік заттар алмасуын қамтамасыз ететін трансфузиялық ұлпа." }
+            ]
+        }
+    };
+
+    const canvas = document.getElementById('microCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Canvas өлшемін контейнерге бейімдеу
+    function resizeCanvas() {
+        const container = document.getElementById('canvasContainer');
+        if (!container) return;
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight;
+        drawMicroscope();
+    }
+
+    // Қойындылар арасында ауысу
+    function switchTab(tabId, btn) {
+        document.querySelectorAll('.tab-section').forEach(s => s.classList.add('hidden'));
+        document.querySelectorAll('.tab-btn').forEach(b => {
+            b.classList.remove('active', 'bg-emerald-800', 'bg-indigo-800', 'text-white', 'border-emerald-800', 'border-indigo-800', 'shadow-sm');
+            if (b.textContent.includes('Мұғалім')) {
+                b.classList.add('bg-white', 'text-indigo-900', 'border-indigo-200');
+            } else {
+                b.classList.add('bg-white', 'text-slate-700', 'border-emerald-200');
+            }
+        });
+
+        document.getElementById(tabId).classList.remove('hidden');
+        btn.classList.remove('bg-white', 'text-slate-700', 'text-indigo-900', 'border-emerald-200', 'border-indigo-200');
+        if (tabId === 'teacher') {
+            btn.classList.add('active', 'bg-indigo-800', 'text-white', 'border-indigo-800', 'shadow-sm');
+            if (isTeacherUnlocked) renderTeacherDashboard();
+        } else {
+            btn.classList.add('active', 'bg-emerald-800', 'text-white', 'border-emerald-800', 'shadow-sm');
+        }
+
+        if (tabId === 'microscope') {
+            resizeCanvas();
+        }
+    }
+
+    // Микропрепаратты таңдау
+    function selectSpecimen(spec, btn) {
+        currentSpecimen = spec;
+        hoveredZone = null;
+
+        document.querySelectorAll('.spec-btn').forEach(b => {
+            b.classList.remove('active', 'bg-emerald-700', 'text-white', 'border-emerald-800', 'shadow-sm');
+            b.classList.add('bg-lime-50', 'text-slate-800', 'border-emerald-300');
+        });
+        btn.classList.remove('bg-lime-50', 'text-slate-800', 'border-emerald-300');
+        btn.classList.add('active', 'bg-emerald-700', 'text-white', 'border-emerald-800', 'shadow-sm');
+
+        const data = specimenData[spec];
+        document.getElementById('hudSpecimen').textContent = data.hud;
+        document.getElementById('infoTitle').textContent = data.title;
+        document.getElementById('infoDesc').textContent = data.desc;
+
+        renderLegend();
+        drawMicroscope();
+    }
+
+    // Құрылымдық элементтер тізімін шығару
+    function renderLegend() {
+        const list = document.getElementById('legendList');
+        list.innerHTML = '';
+        specimenData[currentSpecimen].zones.forEach(z => {
+            const li = document.createElement('li');
+            li.className = 'flex items-center gap-2 text-xs p-2 bg-slate-50 hover:bg-emerald-50 border border-slate-200 hover:border-emerald-400 rounded-lg cursor-pointer transition';
+            li.innerHTML = `<span class="w-3.5 h-3.5 rounded shrink-0 border border-black/20" style="background:${z.color}"></span><span class="font-medium text-slate-700">${z.name}</span>`;
+            li.onclick = () => {
+                hoveredZone = z.id;
+                document.getElementById('infoTitle').textContent = z.name;
+                document.getElementById('infoDesc').textContent = z.desc;
+                drawMicroscope();
+            };
+            list.appendChild(li);
+        });
+    }
+
+    // Белгілерді қосу/өшіру
+    function toggleLabels() {
+        showLabels = !showLabels;
+        const btn = document.getElementById('labelToggle');
+        if (showLabels) {
+            btn.textContent = "🏷️ Белгілер: ҚОСУЛЫ";
+            btn.classList.remove('bg-white', 'text-emerald-800');
+            btn.classList.add('bg-emerald-700', 'text-white');
+        } else {
+            btn.textContent = "🏷️ Белгілер: ӨШІРУЛІ";
+            btn.classList.remove('bg-emerald-700', 'text-white');
+            btn.classList.add('bg-white', 'text-emerald-800');
+        }
+        drawMicroscope();
+    }
+
+    // Ұлғайту мен фокусты жаңарту
+    function updateMicroscope() {
+        const zoom = parseFloat(document.getElementById('zoomSlider').value);
+        const focus = Math.abs(parseInt(document.getElementById('focusSlider').value));
+        document.getElementById('zoomLabel').textContent = `Ұлғайту: ${Math.round(zoom * 100)}x`;
+        const clarity = Math.max(20, 100 - focus * 8);
+        document.getElementById('hudFocus').textContent = focus === 0 ? "ФОКУС: АНЫҚ (100%)" : `ФОКУС: БҰЛЫҢҒЫР (${clarity}%)`;
+        drawMicroscope();
+    }
+
+    // Негізгі микроскоп суретін салу
+    function drawMicroscope() {
+        const w = canvas.width;
+        const h = canvas.height;
+        if (w === 0 || h === 0) return;
+
+        const zoom = parseFloat(document.getElementById('zoomSlider').value);
+        const focusBlur = Math.abs(parseInt(document.getElementById('focusSlider').value)) * 0.75;
+
+        ctx.save();
+        ctx.clearRect(0, 0, w, h);
+
+        // Жарықтандырылған микроскоп өрісі
+        const grad = ctx.createRadialGradient(w/2, h/2, 30, w/2, h/2, Math.max(w, h) * 0.6);
+        grad.addColorStop(0, '#fcfef9');
+        grad.addColorStop(1, '#dce8d5');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+
+        // 640x370 базалық координаттар жүйесіне масштабтау
+        const baseW = 640;
+        const baseH = 370;
+        const scaleX = w / baseW;
+        const scaleY = h / baseH;
+
+        ctx.filter = `blur(${focusBlur}px)`;
+        ctx.translate(w/2, h/2);
+        ctx.scale(zoom * scaleX, zoom * scaleY);
+        ctx.translate(-baseW/2, -baseH/2);
+
+        if (currentSpecimen === 'ficus') drawFicus(baseW, baseH);
+        else if (currentSpecimen === 'maize') drawMaize(baseW, baseH);
+        else if (currentSpecimen === 'pine') drawPine(baseW, baseH);
+
+        ctx.restore();
+
+        if (showLabels) {
+            ctx.save();
+            ctx.scale(scaleX, scaleY);
+            drawAnnotations(baseW, baseH);
+            ctx.restore();
+        }
+    }
+
+    // 1. Фикус (C3) көлденең қимасы
+    function drawFicus(w, h) {
+        ctx.fillStyle = '#dce775';
+        ctx.fillRect(40, 25, w - 80, 16);
+
+        for (let row = 0; row < 2; row++) {
+            for (let x = 40; x < w - 80; x += 38) {
+                ctx.fillStyle = hoveredZone === 'cuticle' ? '#c5e1a5' : '#f1f8e9';
+                ctx.strokeStyle = '#689f38';
+                ctx.lineWidth = 1.5;
+                ctx.fillRect(x, 41 + row * 24, 38, 24);
+                ctx.strokeRect(x, 41 + row * 24, 38, 24);
+            }
+        }
+        // Цистолиттер
+        [170, 440].forEach(cx => {
+            ctx.fillStyle = '#e8f5e9';
+            ctx.fillRect(cx - 22, 41, 44, 48);
+            ctx.strokeRect(cx - 22, 41, 44, 48);
+            ctx.fillStyle = '#78909c';
+            ctx.beginPath();
+            ctx.arc(cx, 66, 13, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#cfd8dc';
+            ctx.beginPath();
+            ctx.arc(cx - 3, 63, 4, 0, Math.PI * 2);
+            ctx.fill();
+        });
+
+        // Бағаналы паренхима
+        for (let row = 0; row < 2; row++) {
+            for (let x = 45; x < w - 65; x += 18) {
+                ctx.fillStyle = hoveredZone === 'palisade' ? '#2e7d32' : '#43a047';
+                ctx.strokeStyle = '#1b5e20';
+                ctx.beginPath();
+                ctx.roundRect(x, 92 + row * 45, 15, 43, 6);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#1b5e20';
+                ctx.beginPath();
+                ctx.arc(x + 5, 104 + row * 45, 2.2, 0, Math.PI*2);
+                ctx.arc(x + 10, 122 + row * 45, 2.2, 0, Math.PI*2);
+                ctx.fill();
+            }
+        }
+
+        // Кеуекті паренхима
+        ctx.fillStyle = '#e8f5e9';
+        ctx.fillRect(40, 182, w - 80, 145);
+        const spongyCoords = [
+            [80,205],[130,215],[185,200],[240,220],[410,205],[465,218],[525,202],[570,220],
+            [70,255],[120,270],[175,250],[225,275],[280,260],[355,265],[420,252],[480,272],[545,258],
+            [95,302],[155,305],[215,300],[275,308],[340,302],[405,305],[465,300],[530,304]
+        ];
+        spongyCoords.forEach(([sx, sy]) => {
+            ctx.fillStyle = hoveredZone === 'spongy' ? '#66bb6a' : '#81c784';
+            ctx.strokeStyle = '#2e7d32';
+            ctx.beginPath();
+            ctx.ellipse(sx, sy, 20, 14, 0.2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+        });
+
+        // Өткізгіш шоқ
+        ctx.fillStyle = hoveredZone === 'bundle' ? '#ffcdd2' : '#ffebee';
+        ctx.strokeStyle = '#c62828';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(320, 215, 36, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#e53935';
+        for (let i = -14; i <= 14; i += 14) {
+            ctx.beginPath(); ctx.arc(320 + i, 205, 6, 0, Math.PI*2); ctx.fill();
+        }
+        ctx.fillStyle = '#f06292';
+        ctx.fillRect(302, 220, 36, 14);
+
+        // Төменгі эпидермис
+        for (let x = 40; x < w - 80; x += 34) {
+            ctx.fillStyle = hoveredZone === 'lower' ? '#aed581' : '#dcedc8';
+            ctx.strokeStyle = '#558b2f';
+            ctx.lineWidth = 1.5;
+            ctx.fillRect(x, 327, 34, 20);
+            ctx.strokeRect(x, 327, 34, 20);
+        }
+    }
+
+    // 2. Жүгері (C4 - Кранц құрылысы)
+    function drawMaize(w, h) {
+        for (let x = 40; x < w - 70; x += 35) {
+            ctx.fillStyle = hoveredZone === 'epi_m' ? '#c5e1a5' : '#f1f8e9';
+            ctx.strokeStyle = '#689f38';
+            ctx.lineWidth = 1.5;
+            if (x > 260 && x < 370) {
+                ctx.fillStyle = '#e1f5fe';
+                ctx.fillRect(x, 30, 35, 38);
+                ctx.strokeRect(x, 30, 35, 38);
+            } else {
+                ctx.fillRect(x, 30, 35, 22);
+                ctx.strokeRect(x, 30, 35, 22);
+            }
+        }
+
+        ctx.fillStyle = hoveredZone === 'meso_m' ? '#a5d6a7' : '#c8e6c9';
+        ctx.fillRect(40, 52, w - 80, 260);
+
+        [185, 455].forEach(bx => {
+            const by = 185;
+            for (let a = 0; a < Math.PI * 2; a += Math.PI / 6) {
+                const mx = bx + Math.cos(a) * 86;
+                const my = by + Math.sin(a) * 76;
+                ctx.save();
+                ctx.translate(mx, my);
+                ctx.rotate(a);
+                ctx.fillStyle = hoveredZone === 'meso_m' ? '#4caf50' : '#66bb6a';
+                ctx.strokeStyle = '#2e7d32';
+                ctx.beginPath();
+                ctx.ellipse(0, 0, 22, 12, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            for (let a = 0; a < Math.PI * 2; a += Math.PI / 5) {
+                const kx = bx + Math.cos(a) * 48;
+                const ky = by + Math.sin(a) * 44;
+                ctx.fillStyle = hoveredZone === 'kranz' ? '#1b5e20' : '#2e7d32';
+                ctx.strokeStyle = '#0d3b12';
+                ctx.lineWidth = 2.5;
+                ctx.beginPath();
+                ctx.arc(kx, ky, 19, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#a5d6a7';
+                ctx.beginPath();
+                ctx.arc(kx - 5, ky - 4, 4, 0, Math.PI*2);
+                ctx.arc(kx + 5, ky + 4, 4, 0, Math.PI*2);
+                ctx.fill();
+            }
+
+            ctx.fillStyle = hoveredZone === 'vasc_m' ? '#ffcdd2' : '#ffffff';
+            ctx.strokeStyle = '#c62828';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(bx, by, 30, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#e53935';
+            ctx.beginPath(); ctx.arc(bx - 10, by - 4, 8, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(bx + 10, by - 4, 8, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(bx, by + 11, 6, 0, Math.PI*2); ctx.fill();
+        });
+
+        for (let x = 40; x < w - 70; x += 35) {
+            ctx.fillStyle = hoveredZone === 'low_m' ? '#aed581' : '#dcedc8';
+            ctx.strokeStyle = '#558b2f';
+            ctx.lineWidth = 1.5;
+            ctx.fillRect(x, 312, 35, 22);
+            ctx.strokeRect(x, 312, 35, 22);
+        }
+    }
+
+    // 3. Қарағай қылқаны
+    function drawPine(w, h) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(80, 310);
+        ctx.quadraticCurveTo(320, 15, 560, 310);
+        ctx.closePath();
+
+        ctx.fillStyle = hoveredZone === 'p_epi' ? '#a1887f' : '#d7ccc8';
+        ctx.fill();
+        ctx.lineWidth = 8;
+        ctx.strokeStyle = '#5d4037';
+        ctx.stroke();
+        ctx.clip();
+
+        ctx.fillStyle = hoveredZone === 'p_meso' ? '#388e3c' : '#66bb6a';
+        ctx.fillRect(80, 40, 480, 270);
+
+        ctx.strokeStyle = '#1b5e20';
+        ctx.lineWidth = 1.5;
+        for (let x = 110; x < 530; x += 36) {
+            for (let y = 85; y < 290; y += 32) {
+                ctx.beginPath();
+                ctx.roundRect(x, y, 30, 26, 8);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(x + 15, y); ctx.lineTo(x + 15, y + 7);
+                ctx.moveTo(x + 15, y + 26); ctx.lineTo(x + 15, y + 19);
+                ctx.stroke();
+            }
+        }
+
+        [[185, 210], [455, 210], [320, 105]].forEach(([rx, ry]) => {
+            ctx.fillStyle = hoveredZone === 'p_resin' ? '#ff8f00' : '#ffd54f';
+            ctx.strokeStyle = '#e65100';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(rx, ry, 18, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            ctx.fillStyle = '#fff8e1';
+            ctx.beginPath();
+            ctx.arc(rx, ry, 9, 0, Math.PI * 2);
+            ctx.fill();
+        });
+
+        ctx.fillStyle = hoveredZone === 'p_endo' ? '#bbdefb' : '#e3f2fd';
+        ctx.strokeStyle = '#1565c0';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.ellipse(320, 235, 95, 55, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        [285, 355].forEach(vx => {
+            ctx.fillStyle = hoveredZone === 'p_vasc' ? '#ef5350' : '#e57373';
+            ctx.strokeStyle = '#b71c1c';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.ellipse(vx, 235, 22, 28, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+        });
+
+        ctx.restore();
+    }
+
+    // Құрылымдық атауларды салу
+    function drawAnnotations(w, h) {
+        ctx.save();
+        ctx.font = "bold 12px 'Inter', sans-serif";
+        const labels = {
+            ficus: [
+                { text: "Гиподерма және цистолит", x: 170, y: 65 },
+                { text: "Бағаналы паренхима (C₃)", x: 460, y: 135 },
+                { text: "Өткізгіш шоқ", x: 320, y: 215 },
+                { text: "Кеуекті паренхима", x: 140, y: 275 }
+            ],
+            maize: [
+                { text: "Моторлы жасушалар", x: 315, y: 48 },
+                { text: "Шоқпарбас жасушалар (Кранц)", x: 185, y: 125 },
+                { text: "Өткізгіш шоқ", x: 455, y: 185 },
+                { text: "C₄ мезофилл", x: 320, y: 270 }
+            ],
+            pine: [
+                { text: "Эпидермис & Гиподерма", x: 320, y: 58 },
+                { text: "Шайыр жолы", x: 185, y: 210 },
+                { text: "Бүктелген мезофилл", x: 470, y: 145 },
+                { text: "Эндодерма & Қос шоқ", x: 320, y: 238 }
+            ]
+        };
+
+        labels[currentSpecimen].forEach(lbl => {
+            const metrics = ctx.measureText(lbl.text);
+            const pad = 6;
+            ctx.fillStyle = "rgba(15, 35, 22, 0.85)";
+            ctx.beginPath();
+            ctx.roundRect(lbl.x - metrics.width/2 - pad, lbl.y - 11, metrics.width + pad*2, 20, 6);
+            ctx.fill();
+            ctx.fillStyle = "#ffffff";
+            ctx.textAlign = "center";
+            ctx.fillText(lbl.text, lbl.x, lbl.y + 3);
+        });
+        ctx.restore();
+    }
+
+    // Тінтуір және сенсорлық түрту өңдеушісі
+    function handlePointerInspect(clientY) {
+        const rect = canvas.getBoundingClientRect();
+        const yRatio = (clientY - rect.top) / rect.height;
+        const zones = specimenData[currentSpecimen].zones;
+        const found = zones.find(z => yRatio >= z.yRatioMin && yRatio <= z.yRatioMax);
+        if (found && hoveredZone !== found.id) {
+            hoveredZone = found.id;
+            document.getElementById('infoTitle').textContent = found.name;
+            document.getElementById('infoDesc').textContent = found.desc;
+            drawMicroscope();
+        }
+    }
+
+    canvas.addEventListener('mousemove', (e) => handlePointerInspect(e.clientY));
+    canvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length > 0) handlePointerInspect(e.touches[0].clientY);
+    }, { passive: true });
+    canvas.addEventListener('touchmove', (e) => {
+        if (e.touches.length > 0) handlePointerInspect(e.touches[0].clientY);
+    }, { passive: true });
+
+    // Кестені тексеру
+    function checkTable() {
+        let correct = 0;
+        let total = Object.keys(TABLE_ANSWERS).length;
+
+        for (let id in TABLE_ANSWERS) {
+            const el = document.getElementById(id);
+            el.classList.remove('border-emerald-600', 'bg-emerald-50', 'border-red-500', 'bg-red-50', 'border-2');
+            if (el.value === TABLE_ANSWERS[id]) {
+                el.classList.add('border-2', 'border-emerald-600', 'bg-emerald-50');
+                correct++;
+            } else {
+                el.classList.add('border-2', 'border-red-500', 'bg-red-50');
+            }
+        }
+
+        const fb = document.getElementById('tableFeedback');
+        fb.classList.remove('hidden', 'bg-emerald-100', 'text-emerald-900', 'bg-amber-100', 'text-amber-900');
+        if (correct === total) {
+            fb.classList.add('bg-emerald-100', 'text-emerald-900');
+            fb.textContent = `🎉 Тамаша! Барлық ${total}/${total} ұяшық дұрыс толтырылды!`;
+        } else {
+            fb.classList.add('bg-amber-100', 'text-amber-900');
+            fb.textContent = `Нәтиже: ${correct}/${total} дұрыс. Қызылмен белгіленген ұяшықтарды қайта тексеріңіз.`;
+        }
+    }
+
+    // Үлгі қорытындыны толтыру
+    function fillSampleConclusion() {
+        document.getElementById('conclusionText').value =
+            "Қорытынды: C₃ өсімдіктерінде (фикус) мезофилл бағаналы және кеуекті паренхимаға жіктелген, ал C₄ өсімдіктерінде (жүгері) Кранц анатомиясы тән — өткізгіш шоқтарды ірі хлоропластты шоқпарбас жасушалар қоршайды. Экологиялық маңызы: Кранц құрылымы CO₂-ні шоғырландырып, фототынысалуды азайтады, бұл C₄ өсімдіктеріне ыстық, құрғақ және жарық қарқындылығы жоғары ортада суды үнемдеп, тиімді фотосинтез жүргізуге мүмкіндік береді.";
+    }
+
+    // Орындалған жұмысты буферге көшіру
+    function copyWorkSummary() {
+        const name = document.getElementById('studentName').value || "Көрсетілмеген";
+        const cls = document.getElementById('studentClass').value || "Көрсетілмеген";
+        const conclusion = document.getElementById('conclusionText').value || "Жазылмаған";
+        const text = `№4 Зертханалық жұмыс: C₃ және C₄ өсімдіктер мезофилі\nОқушы: ${name} (${cls})\nҚорытынды: ${conclusion}`;
+
+        const temp = document.createElement('textarea');
+        temp.value = text;
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand('copy');
+        document.body.removeChild(temp);
+
+        const fb = document.getElementById('tableFeedback');
+        fb.classList.remove('hidden', 'bg-amber-100', 'text-amber-900');
+        fb.classList.add('bg-emerald-100', 'text-emerald-900');
+        fb.textContent = "📋 Зертханалық жұмыс мәтіні алмасу буферіне көшірілді!";
+    }
+
+    // Бекіту тестін тексеру
+    function checkQuiz() {
+        let score = 0;
+        for (let q in QUIZ_ANSWERS) {
+            const sel = document.querySelector(`input[name="${q}"]:checked`);
+            if (sel && sel.value === QUIZ_ANSWERS[q]) score++;
+        }
+        const fb = document.getElementById('quizFeedback');
+        fb.classList.remove('hidden', 'bg-emerald-100', 'text-emerald-900', 'bg-red-100', 'text-red-900');
+        if (score >= 3) {
+            fb.classList.add('bg-emerald-100', 'text-emerald-900');
+        } else {
+            fb.classList.add('bg-red-100', 'text-red-900');
+        }
+        fb.textContent = `Сіздің нәтижеңіз: ${score} / 4 ұпай (${score * 25}%).`;
+    }
+
+    // ОҚУШЫ ЖҰМЫСЫН МҰҒАЛІМГЕ ЖІБЕРУ
+    async function submitStudentWork() {
+        const nameInput = document.getElementById('studentName');
+        const classInput = document.getElementById('studentClass');
+        const studentName = nameInput.value.trim();
+        const studentClass = classInput.value.trim() || "Көрсетілмеген";
+        const statusBanner = document.getElementById('submitStatusBanner');
+
+        if (!studentName) {
+            statusBanner.classList.remove('hidden', 'bg-emerald-50', 'border-emerald-300', 'text-emerald-900');
+            statusBanner.classList.add('bg-amber-50', 'border-amber-300', 'text-amber-900');
+            statusBanner.textContent = "⚠️ Жібермес бұрын «2. Салыстыру кестесі & Қорытынды» бөлімінде аты-жөніңізді жазыңыз!";
+            return;
+        }
+
+        // Кесте деректерін жинау
+        const tableData = {};
+        let tableCorrect = 0;
+        for (let id in TABLE_ANSWERS) {
+            const val = document.getElementById(id).value;
+            tableData[id] = val;
+            if (val === TABLE_ANSWERS[id]) tableCorrect++;
+        }
+
+        // Тест деректерін жинау
+        const quizData = {};
+        let quizCorrect = 0;
+        for (let q in QUIZ_ANSWERS) {
+            const sel = document.querySelector(`input[name="${q}"]:checked`);
+            const val = sel ? sel.value : "";
+            quizData[q] = val;
+            if (val === QUIZ_ANSWERS[q]) quizCorrect++;
+        }
+
+        const totalPossible = Object.keys(TABLE_ANSWERS).length + Object.keys(QUIZ_ANSWERS).length; // 13
+        const totalScore = tableCorrect + quizCorrect;
+        const percentage = Math.round((totalScore / totalPossible) * 100);
+
+        const payload = {
+            studentName: studentName,
+            studentClass: studentClass,
+            labDate: document.getElementById('labDate').value || new Date().toISOString().slice(0, 10),
+            timestamp: Date.now(),
+            tableData: tableData,
+            tableCorrect: tableCorrect,
+            quizData: quizData,
+            quizCorrect: quizCorrect,
+            percentage: percentage,
+            conclusion: document.getElementById('conclusionText').value.trim(),
+            teacherReviewed: false,
+            teacherGrade: "",
+            teacherComment: ""
+        };
+
+        const btn = document.getElementById('submitWorkBtn');
+        btn.disabled = true;
+        btn.classList.add('opacity-60');
+
+        try {
+            const docId = await window.submitToCloud(payload);
+            currentStudentSubmissionId = docId;
+
+            statusBanner.classList.remove('hidden', 'bg-amber-50', 'border-amber-300', 'text-amber-900');
+            statusBanner.classList.add('bg-emerald-50', 'border-emerald-300', 'text-emerald-900');
+            statusBanner.innerHTML = `✅ <strong>${studentName}</strong>, жұмысыңыз мұғалімге сәтті жіберілді! Бастапқы нәтижеңіз: <strong>${totalScore}/${totalPossible} (${percentage}%)</strong>. Мұғалім тексеріп, түзету енгізген соң хабарлама осы беттің жоғарғы жағында шығады.`;
+        } catch (e) {
+            statusBanner.classList.remove('hidden');
+            statusBanner.classList.add('bg-red-50', 'border-red-300', 'text-red-900');
+            statusBanner.textContent = "❌ Жіберу кезінде қате пайда болды. Қайта байқап көріңіз.";
+        } finally {
+            btn.disabled = false;
+            btn.classList.remove('opacity-60');
+        }
+    }
+
+    // МҰҒАЛІМ КАБИНЕТІ ФУНКЦИЯЛАРЫ
+    function unlockTeacherPanel() {
+        const pin = document.getElementById('teacherPinInput').value.trim();
+        if (pin === '1234') {
+            isTeacherUnlocked = true;
+            document.getElementById('teacherLoginBox').classList.add('hidden');
+            document.getElementById('teacherDashboard').classList.remove('hidden');
+            document.getElementById('teacherLoginError').classList.add('hidden');
+            renderTeacherDashboard();
+        } else {
+            document.getElementById('teacherLoginError').classList.remove('hidden');
+        }
+    }
+
+    function renderTeacherDashboard() {
+        const allSubs = window.labCloud.submissions || [];
+        
+        // Сыныптар тізімін жаңарту
+        const classSelect = document.getElementById('classFilterSelect');
+        const currentFilter = classSelect.value;
+        const uniqueClasses = [...new Set(allSubs.map(s => s.studentClass).filter(Boolean))];
+        classSelect.innerHTML = '<option value="ALL">Барлық сыныптар</option>';
+        uniqueClasses.forEach(cls => {
+            const opt = document.createElement('option');
+            opt.value = cls;
+            opt.textContent = cls;
+            if (cls === currentFilter) opt.selected = true;
+            classSelect.appendChild(opt);
+        });
+
+        const filtered = currentFilter === 'ALL' ? allSubs : allSubs.filter(s => s.studentClass === currentFilter);
+
+        // Жалпы статистиканы есептеу
+        const total = filtered.length;
+        const avg = total > 0 ? Math.round(filtered.reduce((acc, s) => acc + (s.percentage || 0), 0) / total) : 0;
+        const mastered = filtered.filter(s => (s.percentage || 0) >= 80).length;
+        const needHelp = filtered.filter(s => (s.percentage || 0) < 60).length;
+
+        document.getElementById('statTotalStudents').textContent = total;
+        document.getElementById('statAvgScore').textContent = `${avg}%`;
+        document.getElementById('statMasteredCount').textContent = mastered;
+        document.getElementById('statMasteredPercent').textContent = total > 0 ? `Сыныптың ${Math.round((mastered / total) * 100)}%-ы` : "Сыныптың 0%-ы";
+        document.getElementById('statNeedHelpCount').textContent = needHelp;
+
+        // Тақырыптық ұғымдар бойынша статистика
+        renderTopicStats(filtered);
+
+        // Оқушылар тізімін шығару
+        const listContainer = document.getElementById('studentListContainer');
+        if (filtered.length === 0) {
+            listContainer.innerHTML = '<p class="text-xs text-slate-400 text-center py-8">Бұл сыныпта әзірге тапсырылған жұмыстар жоқ.</p>';
+            return;
+        }
+
+        listContainer.innerHTML = '';
+        filtered.forEach(sub => {
+            const isSelected = sub.id === selectedReviewId;
+            const scoreColor = sub.percentage >= 80 ? 'bg-emerald-100 text-emerald-800' : (sub.percentage >= 60 ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800');
+            const statusTag = sub.teacherReviewed
+                ? `<span class="text-[10px] bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-full font-semibold">✓ Тексерілген (${sub.teacherGrade || 'Бағаланды'})</span>`
+                : `<span class="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">Күтілуде</span>`;
+
+            const card = document.createElement('div');
+            card.className = `p-3 rounded-xl border transition cursor-pointer ${isSelected ? 'border-indigo-600 bg-indigo-50/60 shadow-sm' : 'border-slate-200 hover:border-indigo-300 bg-white'}`;
+            card.onclick = () => openStudentReview(sub.id);
+            card.innerHTML = `
+                <div class="flex justify-between items-start gap-2">
+                    <div>
+                        <div class="font-bold text-slate-800 text-xs sm:text-sm">${sub.studentName}</div>
+                        <div class="text-[11px] text-slate-500">${sub.studentClass} • ${sub.labDate || ''}</div>
+                    </div>
+                    <span class="text-xs font-extrabold px-2.5 py-1 rounded-lg ${scoreColor}">${sub.percentage}%</span>
+                </div>
+                <div class="flex justify-between items-center mt-2 pt-2 border-t border-slate-100">
+                    <span class="text-[11px] text-slate-600">Кесте: <strong>${sub.tableCorrect}/9</strong> | Тест: <strong>${sub.quizCorrect}/4</strong></span>
+                    ${statusTag}
+                </div>
+            `;
+            listContainer.appendChild(card);
+        });
+    }
+
+    function renderTopicStats(subs) {
+        const container = document.getElementById('topicBreakdownContainer');
+        if (subs.length === 0) {
+            container.innerHTML = '<p class="text-xs text-slate-400 col-span-2">Статистика есептелуі үшін кемінде 1 оқушы жұмыс тапсыруы керек.</p>';
+            return;
+        }
+
+        const metrics = [
+            {
+                title: "1. Фикус (C₃) мезофилі және гиподерма құрылысы",
+                calc: () => {
+                    let ok = 0;
+                    subs.forEach(s => {
+                        if (s.tableData?.t_ficus_1 === 'c3') ok++;
+                        if (s.tableData?.t_ficus_2 === 'palisade') ok++;
+                        if (s.tableData?.t_ficus_3 === 'hypo') ok++;
+                    });
+                    return Math.round((ok / (subs.length * 3)) * 100);
+                }
+            },
+            {
+                title: "2. Жүгері (C₄) Кранц анатомиясы және шоқпарбас жасушалар",
+                calc: () => {
+                    let ok = 0;
+                    subs.forEach(s => {
+                        if (s.tableData?.t_maize_1 === 'c4') ok++;
+                        if (s.tableData?.t_maize_2 === 'kranz') ok++;
+                        if (s.tableData?.t_maize_3 === 'sheath') ok++;
+                    });
+                    return Math.round((ok / (subs.length * 3)) * 100);
+                }
+            },
+            {
+                title: "3. Қарағай қылқанының ксероморфты бейімделуі (шайыр жолдары)",
+                calc: () => {
+                    let ok = 0;
+                    subs.forEach(s => {
+                        if (s.tableData?.t_pine_1 === 'c3') ok++;
+                        if (s.tableData?.t_pine_2 === 'folded') ok++;
+                        if (s.tableData?.t_pine_3 === 'resin') ok++;
+                    });
+                    return Math.round((ok / (subs.length * 3)) * 100);
+                }
+            },
+            {
+                title: "4. C₄ фотосинтезінің экологиялық маңызын түсіну (Тест)",
+                calc: () => {
+                    let ok = 0;
+                    subs.forEach(s => {
+                        if (s.quizData?.q4 === 'b') ok++;
+                    });
+                    return Math.round((ok / subs.length) * 100);
+                }
+            }
+        ];
+
+        container.innerHTML = '';
+        metrics.forEach(m => {
+            const pct = m.calc();
+            const barColor = pct >= 75 ? 'bg-emerald-600' : (pct >= 50 ? 'bg-amber-500' : 'bg-red-500');
+            const div = document.createElement('div');
+            div.className = 'bg-slate-50 p-3 rounded-xl border border-slate-200';
+            div.innerHTML = `
+                <div class="flex justify-between items-center mb-1.5">
+                    <span class="font-semibold text-slate-700 text-xs">${m.title}</span>
+                    <span class="font-bold text-slate-900 text-xs">${pct}%</span>
+                </div>
+                <div class="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden">
+                    <div class="${barColor} h-full rounded-full transition-all duration-500" style="width: ${pct}%"></div>
+                </div>
+            `;
+            container.appendChild(div);
+        });
+    }
+
+    // Жеке оқушының жұмысын ашу және қатесін түзету панелі
+    function openStudentReview(docId) {
+        selectedReviewId = docId;
+        const sub = window.labCloud.submissions.find(s => s.id === docId);
+        if (!sub) return;
+
+        renderTeacherDashboard(); // таңдалған карточканы белгілеу
+
+        document.getElementById('noStudentSelectedMsg').classList.add('hidden');
+        document.getElementById('studentReviewEditor').classList.remove('hidden');
+        document.getElementById('teacherSaveToast').classList.add('hidden');
+
+        document.getElementById('revStudentName').textContent = sub.studentName;
+        document.getElementById('revStudentMeta').textContent = `Сыныбы: ${sub.studentClass} • Күні: ${sub.labDate || '-'}`;
+        document.getElementById('revTableScore').textContent = `Кесте: ${sub.tableCorrect}/9`;
+        document.getElementById('revQuizScore').textContent = `Тест: ${sub.quizCorrect}/4`;
+        document.getElementById('revConclusionEdit').value = sub.conclusion || "";
+        document.getElementById('revTeacherGrade').value = sub.teacherGrade || `${sub.percentage}% (${sub.percentage >= 80 ? 'Өте жақсы' : sub.percentage >= 60 ? 'Жақсы' : 'Қанағаттанарлық'})`;
+        document.getElementById('revTeacherComment').value = sub.teacherComment || "";
+
+        // Кесте ұяшықтарын интерактивті түзету түрінде салу
+        const rows = [
+            { label: "Фикус (C₃)", keys: ["t_ficus_1", "t_ficus_2", "t_ficus_3"] },
+            { label: "Жүгері (C₄)", keys: ["t_maize_1", "t_maize_2", "t_maize_3"] },
+            { label: "Қарағай", keys: ["t_pine_1", "t_pine_2", "t_pine_3"] }
+        ];
+
+        const tbody = document.getElementById('revTableBody');
+        tbody.innerHTML = '';
+        rows.forEach(r => {
+            const tr = document.createElement('tr');
+            let cellsHtml = `<td class="p-2 font-semibold text-slate-700 bg-slate-50">${r.label}</td>`;
+            r.keys.forEach(k => {
+                const studentVal = sub.tableData ? sub.tableData[k] : "";
+                const isCorrect = studentVal === TABLE_ANSWERS[k];
+                const cellBg = isCorrect ? 'bg-emerald-50 border-emerald-400 text-emerald-950' : 'bg-red-50 border-red-400 text-red-950';
+                
+                let optionsHtml = `<option value="">-- Бос --</option>`;
+                for (let optKey in OPTION_LABELS[k]) {
+                    const selAttr = optKey === studentVal ? 'selected' : '';
+                    optionsHtml += `<option value="${optKey}" ${selAttr}>${OPTION_LABELS[k][optKey]}</option>`;
+                }
+
+                cellsHtml += `
+                    <td class="p-1.5">
+                        <select data-rev-key="${k}" onchange="recalcReviewSelectColor(this)" class="w-full p-1.5 rounded border text-[11px] font-medium ${cellBg}">
+                            ${optionsHtml}
+                        </select>
+                    </td>
+                `;
+            });
+            tr.innerHTML = cellsHtml;
+            tbody.appendChild(tr);
+        });
+
+        // Тест жауаптарын көрсету
+        const qContainer = document.getElementById('revQuizDetails');
+        qContainer.innerHTML = '';
+        ['q1', 'q2', 'q3', 'q4'].forEach((qKey, idx) => {
+            const ans = sub.quizData ? sub.quizData[qKey] : "-";
+            const ok = ans === QUIZ_ANSWERS[qKey];
+            const badge = document.createElement('div');
+            badge.className = `p-2 rounded-lg border text-center font-semibold ${ok ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-red-50 border-red-300 text-red-800'}`;
+            badge.innerHTML = `${idx + 1}-сұрақ: <strong>${(ans || 'Жоқ').toUpperCase()}</strong> ${ok ? '✓' : `✗ (Дұрыс: ${QUIZ_ANSWERS[qKey].toUpperCase()})`}`;
+            qContainer.appendChild(badge);
+        });
+    }
+
+    function recalcReviewSelectColor(selEl) {
+        const key = selEl.getAttribute('data-rev-key');
+        const isCorrect = selEl.value === TABLE_ANSWERS[key];
+        selEl.className = `w-full p-1.5 rounded border text-[11px] font-medium ${isCorrect ? 'bg-emerald-50 border-emerald-400 text-emerald-950' : 'bg-red-50 border-red-400 text-red-950'}`;
+    }
+
+    // Мұғалімнің түзетулерін сақтау
+    async function saveTeacherCorrection() {
+        if (!selectedReviewId) return;
+        const sub = window.labCloud.submissions.find(s => s.id === selectedReviewId);
+        if (!sub) return;
+
+        const updatedTableData = { ...(sub.tableData || {}) };
+        let newTableCorrect = 0;
+
+        document.querySelectorAll('#revTableBody select[data-rev-key]').forEach(sel => {
+            const k = sel.getAttribute('data-rev-key');
+            updatedTableData[k] = sel.value;
+            if (sel.value === TABLE_ANSWERS[k]) newTableCorrect++;
+        });
+
+        const totalPossible = 13;
+        const newPercentage = Math.round(((newTableCorrect + (sub.quizCorrect || 0)) / totalPossible) * 100);
+
+        const updates = {
+            tableData: updatedTableData,
+            tableCorrect: newTableCorrect,
+            percentage: newPercentage,
+            conclusion: document.getElementById('revConclusionEdit').value.trim(),
+            teacherReviewed: true,
+            teacherGrade: document.getElementById('revTeacherGrade').value.trim(),
+            teacherComment: document.getElementById('revTeacherComment').value.trim()
+        };
+
+        await window.updateSubmissionInCloud(selectedReviewId, updates);
+
+        document.getElementById('revTableScore').textContent = `Кесте: ${newTableCorrect}/9`;
+        const toast = document.getElementById('teacherSaveToast');
+        toast.classList.remove('hidden');
+        setTimeout(() => toast.classList.add('hidden'), 4000);
+    }
+
+    async function deleteCurrentStudentWork() {
+        if (!selectedReviewId) return;
+        await window.deleteSubmissionInCloud(selectedReviewId);
+        selectedReviewId = null;
+        document.getElementById('studentReviewEditor').classList.add('hidden');
+        document.getElementById('noStudentSelectedMsg').classList.remove('hidden');
+    }
+
+    // Сынып статистикасын бірден көру үшін тесттік оқушылар қосу
+    async function loadDemoSubmissions() {
+        const demos = [
+            {
+                studentName: "Әлихан Серікұлы",
+                studentClass: "11 «А»",
+                labDate: new Date().toISOString().slice(0, 10),
+                timestamp: Date.now() - 300000,
+                tableData: { t_ficus_1: 'c3', t_ficus_2: 'palisade', t_ficus_3: 'hypo', t_maize_1: 'c4', t_maize_2: 'kranz', t_maize_3: 'sheath', t_pine_1: 'c3', t_pine_2: 'folded', t_pine_3: 'resin' },
+                tableCorrect: 9,
+                quizData: { q1: 'b', q2: 'a', q3: 'b', q4: 'b' },
+                quizCorrect: 4,
+                percentage: 100,
+                conclusion: "C₄ өсімдіктерінде Кранц құрылысы фототынысалуды тежеп, ыстық климатта фотосинтез тиімділігін арттырады.",
+                teacherReviewed: false,
+                teacherGrade: "",
+                teacherComment: ""
+            },
+            {
+                studentName: "Аружан Болатқызы",
+                studentClass: "11 «А»",
+                labDate: new Date().toISOString().slice(0, 10),
+                timestamp: Date.now() - 200000,
+                tableData: { t_ficus_1: 'c3', t_ficus_2: 'palisade', t_ficus_3: 'hypo', t_maize_1: 'c4', t_maize_2: 'palisade', t_maize_3: 'sheath', t_pine_1: 'c3', t_pine_2: 'folded', t_pine_3: 'hypo' },
+                tableCorrect: 7,
+                quizData: { q1: 'b', q2: 'a', q3: 'b', q4: 'a' },
+                quizCorrect: 3,
+                percentage: 77,
+                conclusion: "Фикус бағаналы және кеуекті мезофиллден тұрады, ал жүгеріде шоқпарбас жасушалар бар.",
+                teacherReviewed: false,
+                teacherGrade: "",
+                teacherComment: ""
+            },
+            {
+                studentName: "Данияр Мұрат",
+                studentClass: "11 «Ә»",
+                labDate: new Date().toISOString().slice(0, 10),
+                timestamp: Date.now() - 100000,
+                tableData: { t_ficus_1: 'c4', t_ficus_2: 'kranz', t_ficus_3: 'hypo', t_maize_1: 'c3', t_maize_2: 'palisade', t_maize_3: 'sheath', t_pine_1: 'c3', t_pine_2: 'folded', t_pine_3: 'resin' },
+                tableCorrect: 5,
+                quizData: { q1: 'a', q2: 'a', q3: 'b', q4: 'a' },
+                quizCorrect: 2,
+                percentage: 54,
+                conclusion: "Өсімдіктердің жапырақ құрылысы әртүрлі болады.",
+                teacherReviewed: false,
+                teacherGrade: "",
+                teacherComment: ""
+            }
+        ];
+
+        for (const d of demos) {
+            await window.submitToCloud(d);
+        }
+    }
+
+    // Деректер жаңарған кезде UI-ды синхрондау
+    window.addEventListener('cloudReady', () => {
+        const dot = document.getElementById('cloudStatusDot');
+        const txt = document.getElementById('cloudStatusText');
+        dot.classList.remove('bg-amber-400', 'animate-pulse');
+        if (window.labCloud.enabled) {
+            dot.classList.add('bg-emerald-400');
+            txt.textContent = "Бұлттық байланыс белсенді";
+        } else {
+            dot.classList.add('bg-sky-400');
+            txt.textContent = "Жергілікті сессия режимі";
+        }
+    });
+
+    window.addEventListener('submissionsUpdated', (e) => {
+        const list = e.detail || [];
+        document.getElementById('submissionBadge').textContent = list.length;
+
+        // Егер оқушы өз жұмысын жіберген болса және мұғалім оны тексерсе — оқушыға көрсету
+        if (currentStudentSubmissionId) {
+            const myWork = list.find(s => s.id === currentStudentSubmissionId);
+            if (myWork && myWork.teacherReviewed) {
+                const alertBox = document.getElementById('studentFeedbackAlert');
+                alertBox.classList.remove('hidden');
+                document.getElementById('teacherGradeBadge').textContent = myWork.teacherGrade || `${myWork.percentage}%`;
+                document.getElementById('teacherCommentDisplay').textContent = myWork.teacherComment || "Мұғалім жұмысыңызды тексеріп, түзетулер енгізді.";
+                document.getElementById('teacherCorrectionNote').textContent = `Түзетілген кесте нәтижесі: ${myWork.tableCorrect}/9. Кесте ұяшықтары жаңартылды.`;
+
+                // Оқушының кестесі мен қорытындысына мұғалім түзеткен мәндерді қолдану
+                if (myWork.tableData) {
+                    for (let k in myWork.tableData) {
+                        const el = document.getElementById(k);
+                        if (el) {
+                            el.value = myWork.tableData[k];
+                            el.classList.remove('border-red-500', 'bg-red-50');
+                            el.classList.add('border-2', 'border-indigo-500', 'bg-indigo-50');
+                        }
+                    }
+                }
+                if (myWork.conclusion) {
+                    document.getElementById('conclusionText').value = myWork.conclusion;
+                }
+            }
+        }
+
+        if (isTeacherUnlocked) {
+            renderTeacherDashboard();
+        }
+    });
+
+    // Бет жүктелгенде инициализациялау
+    window.addEventListener('load', () => {
+        document.getElementById('labDate').valueAsDate = new Date();
+        renderLegend();
+        resizeCanvas();
+    });
+    window.addEventListener('resize', resizeCanvas);
+</script>
+</body>
+</html>
